@@ -136,13 +136,18 @@ function legalActions(room, p) {
     return {};
   }
   const toCall = Math.max(0, room.currentBet - p.streetBet);
+  const minRaiseTo = room.currentBet + room.minRaise;
+  const maxRaiseTo = p.streetBet + p.chips;
+  const canMakeFullRaise = room.raiseRights.has(p.id) && maxRaiseTo >= minRaiseTo;
   return {
     fold: true,
     check: toCall === 0,
     call: toCall > 0,
     callAmount: Math.min(toCall, p.chips),
-    raise: p.chips > toCall,
-    minRaiseTo: room.currentBet + room.minRaise,
+    raise: canMakeFullRaise,
+    minRaiseTo,
+    maxRaiseTo,
+    betLabel: room.currentBet === 0 ? "下注 Bet" : "加注 Raise",
     allIn: p.chips > 0
   };
 }
@@ -180,8 +185,32 @@ function chooseNextPending(room, afterSeat) {
   return nextFromSeat(room.players, afterSeat, p => room.pending.has(p.id));
 }
 
+function clearNextHandTimer(room) {
+  if (room.nextHandTimer) clearTimeout(room.nextHandTimer);
+  room.nextHandTimer = null;
+}
+
+function cleanBettingSets(room) {
+  room.pending = new Set([...room.pending].filter(id => {
+    const p = getPlayer(room, id);
+    return p && p.inHand && !p.folded && !p.allIn;
+  }));
+  room.raiseRights = new Set([...room.raiseRights].filter(id => {
+    const p = getPlayer(room, id);
+    return p && p.inHand && !p.folded && !p.allIn;
+  }));
+}
+
+function requireResponsesToBet(room, actorId) {
+  for (const p of actionable(room)) {
+    if (p.id !== actorId && p.streetBet < room.currentBet) room.pending.add(p.id);
+  }
+}
+
 function startHand(room) {
+  if (room.handActive) return false;
   clearTurnTimer(room);
+  clearNextHandTimer(room);
   room.players = room.players.filter(p => p.connected || p.inHand);
   const active = playablePlayers(room);
   if (active.length < 2) {
@@ -190,7 +219,7 @@ function startHand(room) {
     room.message = "等待至少 2 名玩家加入";
     room.turnId = null;
     emitState(room);
-    return;
+    return false;
   }
 
   room.handActive = true;
@@ -202,6 +231,7 @@ function startHand(room) {
   room.currentBet = 0;
   room.minRaise = BIG_BLIND;
   room.pending = new Set();
+  room.raiseRights = new Set();
   room.message = `第 ${room.handNumber} 局`;
   room.sbId = null;
   room.bbId = null;
@@ -246,21 +276,33 @@ function startHand(room) {
   post(room, bb, BIG_BLIND);
   room.currentBet = Math.max(sb.streetBet, bb.streetBet);
   room.pending = new Set(actionable(room).map(p => p.id));
+  room.raiseRights = new Set(actionable(room).map(p => p.id));
 
   log(room, `${dealer.name} 是庄家`);
   log(room, `${sb.name} 小盲 ${sb.streetBet}，${bb.name} 大盲 ${bb.streetBet}`);
 
   if (contenders(room).length <= 1) return finishByFold(room);
-  if (actionable(room).length <= 1) return runoutAndShowdown(room);
+  if (actionable(room).length === 0) return runoutAndShowdown(room);
+
+  // If everyone except one player is already all-in from the blinds, the
+  // remaining player only needs a turn when chips are still owed to the pot.
+  if (actionable(room).length === 1) {
+    const lone = actionable(room)[0];
+    if (lone.streetBet >= room.currentBet) return runoutAndShowdown(room);
+    room.pending = new Set([lone.id]);
+    room.raiseRights = new Set();
+  }
 
   const first = nextFromSeat(seats, bb.seat, p => room.pending.has(p.id));
   setTurn(room, first);
+  return true;
 }
 function scheduleNextHand(room, delay = 4500) {
   clearTurnTimer(room);
   room.turnId = null;
-  if (room.nextHandTimer) clearTimeout(room.nextHandTimer);
+  clearNextHandTimer(room);
   room.nextHandTimer = setTimeout(() => {
+    room.nextHandTimer = null;
     room.players = room.players.filter(p => p.connected);
     startHand(room);
   }, delay);
@@ -271,6 +313,7 @@ function resetStreet(room) {
   room.currentBet = 0;
   room.minRaise = BIG_BLIND;
   room.pending = new Set(actionable(room).map(p => p.id));
+  room.raiseRights = new Set(actionable(room).map(p => p.id));
 }
 function burn(room) { room.deck.pop(); }
 function advanceStreet(room) {
@@ -305,6 +348,9 @@ function advanceStreet(room) {
 }
 function runoutAndShowdown(room) {
   clearTurnTimer(room);
+  room.pending.clear();
+  room.raiseRights.clear();
+  room.turnId = null;
   while (room.board.length < 5) {
     if (room.board.length === 0) {
       burn(room);
@@ -421,6 +467,8 @@ function showdown(room) {
   room.stage = "showdown";
   room.handActive = false;
   room.turnId = null;
+  room.pending.clear();
+  room.raiseRights.clear();
   const live = contenders(room);
   for (const p of live) p.handValue = best7([...p.hole, ...room.board]);
   const awards = awardSidePots(room);
@@ -441,6 +489,8 @@ function finishByFold(room) {
   room.handActive = false;
   room.stage = "showdown";
   room.turnId = null;
+  room.pending.clear();
+  room.raiseRights.clear();
   if (winner) {
     winner.chips += room.pot;
     room.message = `${winner.name} 赢得底池 ${room.pot}`;
@@ -452,11 +502,7 @@ function finishByFold(room) {
 }
 function afterAction(room, actorSeat) {
   if (contenders(room).length <= 1) return finishByFold(room);
-  if (actionable(room).length <= 1) return runoutAndShowdown(room);
-  room.pending = new Set([...room.pending].filter(id => {
-    const p = getPlayer(room,id);
-    return p && p.inHand && !p.folded && !p.allIn;
-  }));
+  cleanBettingSets(room);
   if (room.pending.size === 0) return advanceStreet(room);
   const next = chooseNextPending(room, actorSeat);
   setTurn(room, next);
@@ -469,46 +515,52 @@ function handleAction(room, p, type, amount = 0, automatic = false) {
   if (type === "fold") {
     p.folded = true;
     room.pending.delete(p.id);
+    room.raiseRights.delete(p.id);
     if (!automatic) log(room, `${p.name} 弃牌`);
   } else if (type === "check") {
     if (toCall !== 0) return;
     room.pending.delete(p.id);
+    room.raiseRights.delete(p.id);
     if (!automatic) log(room, `${p.name} 过牌`);
   } else if (type === "call") {
     if (toCall <= 0) return;
     const paid = post(room, p, toCall);
     room.pending.delete(p.id);
+    room.raiseRights.delete(p.id);
     log(room, `${p.name} 跟注 ${paid}${p.allIn ? "（All-in）" : ""}`);
   } else if (type === "raise") {
     const target = Math.floor(Number(amount) || 0);
     const minTarget = room.currentBet + room.minRaise;
     const maxTarget = p.streetBet + p.chips;
-    if (maxTarget <= room.currentBet) return;
+    if (!room.raiseRights.has(p.id) || maxTarget < minTarget) return;
     const finalTarget = Math.min(target, maxTarget);
-    if (finalTarget < minTarget && finalTarget !== maxTarget) return;
+    if (finalTarget < minTarget) return;
     const oldBet = room.currentBet;
-    const paid = post(room, p, finalTarget - p.streetBet);
+    post(room, p, finalTarget - p.streetBet);
     const newBet = p.streetBet;
-    if (newBet <= oldBet) return;
     const raiseSize = newBet - oldBet;
-    if (raiseSize >= room.minRaise) room.minRaise = raiseSize;
+    room.minRaise = raiseSize;
     room.currentBet = newBet;
     room.pending = new Set(actionable(room).filter(x=>x.id!==p.id).map(x=>x.id));
+    room.raiseRights = new Set(actionable(room).filter(x=>x.id!==p.id).map(x=>x.id));
     log(room, `${p.name} 加注到 ${newBet}${p.allIn ? "（All-in）" : ""}`);
   } else if (type === "allin") {
     const oldBet = room.currentBet;
     const paid = post(room, p, p.chips);
+    room.pending.delete(p.id);
+    room.raiseRights.delete(p.id);
     if (p.streetBet > oldBet) {
       const raiseSize = p.streetBet - oldBet;
       room.currentBet = p.streetBet;
       if (raiseSize >= room.minRaise) {
         room.minRaise = raiseSize;
         room.pending = new Set(actionable(room).filter(x=>x.id!==p.id).map(x=>x.id));
+        room.raiseRights = new Set(actionable(room).filter(x=>x.id!==p.id).map(x=>x.id));
       } else {
-        room.pending.delete(p.id);
+        // A short all-in does not reopen raising for players who already
+        // acted, but every player below the new price must still call or fold.
+        requireResponsesToBet(room, p.id);
       }
-    } else {
-      room.pending.delete(p.id);
     }
     log(room, `${p.name} All-in ${paid}`);
   } else {
@@ -533,10 +585,12 @@ function createRoom(code) {
     currentBet: 0,
     minRaise: BIG_BLIND,
     pending: new Set(),
+    raiseRights: new Set(),
     turnId: null,
     turnTimer: null,
     actionDeadline: null,
     nextHandTimer: null,
+    cleanupTimer: null,
     log: [],
     message: "等待至少 2 名玩家加入"
   };
@@ -550,6 +604,19 @@ io.on("connection", socket => {
 
     if (!rooms.has(code)) rooms.set(code, createRoom(code));
     const r = rooms.get(code);
+    if (r.cleanupTimer) {
+      clearTimeout(r.cleanupTimer);
+      r.cleanupTimer = null;
+    }
+
+    // A queued join followed by Socket.IO's connect callback can deliver the
+    // same join twice. Keep the event idempotent so one browser gets one seat.
+    const existing = getPlayer(r, socket.id);
+    if (existing) {
+      existing.connected = true;
+      emitState(r);
+      return;
+    }
 
     // Rejoin by a same-name disconnected seat if possible.
     let p = r.players.find(x => !x.connected && x.name === nick);
@@ -570,7 +637,7 @@ io.on("connection", socket => {
     emitState(r);
 
     if (!r.handActive && playablePlayers(r).length >= 2) {
-      if (r.nextHandTimer) clearTimeout(r.nextHandTimer);
+      clearNextHandTimer(r);
       r.nextHandTimer = setTimeout(() => startHand(r), 1200);
     }
   });
@@ -623,13 +690,32 @@ io.on("connection", socket => {
     }
     if (!r.players.some(x=>x.connected)) {
       clearTurnTimer(r);
-      if (r.nextHandTimer) clearTimeout(r.nextHandTimer);
-      setTimeout(() => {
+      clearNextHandTimer(r);
+      if (r.cleanupTimer) clearTimeout(r.cleanupTimer);
+      r.cleanupTimer = setTimeout(() => {
         const rr = rooms.get(code);
         if (rr && !rr.players.some(x=>x.connected)) rooms.delete(code);
       }, 10 * 60 * 1000);
+      r.cleanupTimer.unref?.();
     }
   });
 });
 
-server.listen(PORT, () => console.log(`Friends Poker V2 running on ${PORT}`));
+if (require.main === module) {
+  server.listen(PORT, () => console.log(`Friends Poker V2 running on ${PORT}`));
+}
+
+module.exports = {
+  server,
+  io,
+  createRoom,
+  startHand,
+  handleAction,
+  legalActions,
+  clearTurnTimer,
+  clearNextHandTimer,
+  handValue5,
+  best7,
+  compareValue,
+  awardSidePots
+};

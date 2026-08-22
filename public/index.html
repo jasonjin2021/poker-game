@@ -13,6 +13,7 @@ button,input{font:inherit}.app{max-width:1180px;margin:auto;padding:18px}.top{di
 .seats{position:absolute;inset:0;z-index:3}.player{position:absolute;width:170px;min-height:108px;padding:11px;border-radius:16px;background:#101a16eF;border:1px solid #ffffff22;box-shadow:0 8px 25px #0008;text-align:center;transform:translate(-50%,-50%)}.player.turn{outline:3px solid var(--gold);box-shadow:0 0 25px #f6c85f66}.player.me{background:#17251e}.player.folded{opacity:.48}.player .name{font-weight:900}.badges{font-size:12px;color:#ffd86b;min-height:17px}.chips{margin:3px 0}.bet{font-size:13px;color:#9de0ba}.hole{display:flex;justify-content:center;gap:5px;margin-top:6px}.hole .card{width:36px;height:50px;font-size:15px;border-radius:5px}.status{font-size:12px;opacity:.75}
 .actions{max-width:900px;margin:-35px auto 0;position:relative;z-index:5;background:#0d1712dd;border:1px solid #ffffff1c;border-radius:18px;padding:13px;display:flex;gap:9px;justify-content:center;flex-wrap:wrap;backdrop-filter:blur(8px)}.actions button{border:0;border-radius:11px;padding:12px 17px;font-weight:900;cursor:pointer}.actions button:disabled{opacity:.35;cursor:not-allowed}.fold{background:#e45a5a}.check{background:#e8e8e8}.call{background:#75d99b}.raise{background:#f4c65e}.allin{background:#b98cf4}.small{padding:8px 12px!important;background:#ffffff16!important;color:#fff}
 .raiseBox{display:flex;align-items:center;gap:6px}.raiseBox input{width:100px;padding:10px;border-radius:9px;border:1px solid #ffffff33;background:#07110c;color:#fff}.msg{text-align:center;font-weight:800;margin:10px}.timer{height:5px;background:#ffffff18;border-radius:10px;overflow:hidden;max-width:420px;margin:8px auto}.timer>div{height:100%;background:#f6c85f;width:100%}
+.actionHint{width:100%;text-align:center;min-height:18px;font-size:12px;color:#d7e7de;opacity:.8}
 .bottom{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px auto;max-width:1000px}.panel{background:#0f1a15;border:1px solid #ffffff17;border-radius:16px;padding:14px}.panel h3{margin:0 0 8px}.log{font-size:13px;opacity:.82;line-height:1.6;max-height:145px;overflow:auto}.notice{opacity:.6;text-align:center;font-size:12px;margin:16px}
 @media(max-width:760px){.app{padding:10px}.brand{font-size:21px}.tableWrap{min-height:570px}.table{inset:75px 12px 95px;border-width:8px}.player{width:135px;min-height:98px;font-size:13px}.card{width:46px;height:68px;font-size:19px}.center{width:85%}.bottom{grid-template-columns:1fr}.actions{margin-top:-55px}.raiseBox input{width:80px}}
 </style>
@@ -55,11 +56,12 @@ button,input{font:inherit}.app{max-width:1180px;margin:auto;padding:18px}.top{di
       <button class="check" id="checkBtn" onclick="act('check')">过牌 Check</button>
       <button class="call" id="callBtn" onclick="act('call')">跟注 Call</button>
       <div class="raiseBox">
-        <input id="raiseAmount" type="number" step="100" min="100">
+        <input id="raiseAmount" type="number" step="50" min="100" aria-label="下注或加注后的总额">
         <button class="raise" id="raiseBtn" onclick="raiseBet()">加注 Raise</button>
       </div>
       <button class="allin" id="allinBtn" onclick="act('allin')">All-in</button>
       <button class="small" id="startBtn" onclick="startNow()" hidden>开始下一局</button>
+      <div id="actionHint" class="actionHint"></div>
     </div>
 
     <div class="bottom">
@@ -144,10 +146,23 @@ function render(r){
   $("callBtn").disabled = !L.call;
   $("callBtn").textContent = L.call ? `跟注 ${L.callAmount}` : "跟注 Call";
   $("raiseBtn").disabled = !L.raise;
+  $("raiseBtn").textContent = L.betLabel || "加注 Raise";
   $("allinBtn").disabled = !L.allIn;
   $("raiseAmount").disabled = !L.raise;
-  if(L.raise && (!Number($("raiseAmount").value) || Number($("raiseAmount").value)<L.minRaiseTo)){
-    $("raiseAmount").value = L.minRaiseTo;
+  if(L.raise){
+    $("raiseAmount").min = L.minRaiseTo;
+    $("raiseAmount").max = L.maxRaiseTo;
+    const entered = Number($("raiseAmount").value);
+    if(!entered || entered<L.minRaiseTo || entered>L.maxRaiseTo){
+      $("raiseAmount").value = L.minRaiseTo;
+    }
+    $("actionHint").textContent = `${r.currentBet===0?"最低下注":"最低加注到"} ${L.minRaiseTo} · 输入的是本轮总额`;
+  } else if(L.allIn && r.turnId===r.me) {
+    $("actionHint").textContent = L.call
+      ? "筹码不足或加注权未开放；仍可跟注、弃牌或 All-in"
+      : "可过牌或 All-in";
+  } else {
+    $("actionHint").textContent = "";
   }
   $("startBtn").hidden = !r.canStart;
 
