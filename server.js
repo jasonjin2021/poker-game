@@ -1,0 +1,5 @@
+const express=require('express');const http=require('http');const {Server}=require('socket.io');
+const app=express(),server=http.createServer(app),io=new Server(server);app.use(express.static('public'));
+const rooms={};
+io.on('connection',s=>{s.on('join',({room,name})=>{room=(room||'8888').trim();name=(name||'Player').trim().slice(0,16);s.join(room);s.data={room,name};rooms[room]??={players:[],pot:0,board:[]};let r=rooms[room];r.players=r.players.filter(p=>p.id!==s.id);r.players.push({id:s.id,name,chips:10000,status:'playing'});io.to(room).emit('state',r)});s.on('action',a=>{let r=rooms[s.data?.room];if(!r)return;let p=r.players.find(x=>x.id===s.id);if(!p)return;if(a==='fold')p.status='folded';if(a==='bet'&&p.chips>=100){p.chips-=100;r.pot+=100}io.to(s.data.room).emit('state',r)});s.on('disconnect',()=>{let room=s.data?.room,r=rooms[room];if(!r)return;r.players=r.players.filter(p=>p.id!==s.id);io.to(room).emit('state',r)})});
+server.listen(process.env.PORT||3000,()=>console.log('Poker server running'));
